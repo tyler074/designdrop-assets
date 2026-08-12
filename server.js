@@ -13,6 +13,9 @@ const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilit
 const PRICE_SCREENSHOT = process.env.PRICE_SCREENSHOT || "$0.005";
 const PRICE_PDF = process.env.PRICE_PDF || "$0.01";
 const PRICE_MARKDOWN = process.env.PRICE_MARKDOWN || "$0.003";
+const PRICE_PDF_TEXT = process.env.PRICE_PDF_TEXT || "$0.004";
+const PRICE_HTML = process.env.PRICE_HTML || "$0.005";
+const MAX_FETCH_BYTES = 15 * 1024 * 1024;
 // Explicit CHROMIUM_PATH wins; otherwise fall back to playwright-core's own
 // browser resolution (PLAYWRIGHT_BROWSERS_PATH or its default install dir).
 const CHROMIUM_PATH = [process.env.CHROMIUM_PATH, "/opt/pw-browsers/chromium"]
@@ -147,7 +150,7 @@ function clamp(n, lo, hi, dflt) {
 // ---------------------------------------------------------------------------
 const app = express();
 app.set("trust proxy", true); // behind Railway/Fly TLS-terminating proxies
-app.use(express.json({ limit: "64kb" }));
+app.use(express.json({ limit: "2mb" })); // /v1/html accepts raw HTML payloads
 
 const PRICING = {
   "POST /v1/screenshot": {
@@ -164,6 +167,16 @@ const PRICING = {
     price: PRICE_MARKDOWN,
     network: NETWORK,
     config: { description: "Extract a public URL's main content as clean Markdown (JS-rendered, Readability-extracted)", mimeType: "application/json" },
+  },
+  "POST /v1/pdf-text": {
+    price: PRICE_PDF_TEXT,
+    network: NETWORK,
+    config: { description: "Extract text from a PDF at a public URL", mimeType: "application/json" },
+  },
+  "POST /v1/html": {
+    price: PRICE_HTML,
+    network: NETWORK,
+    config: { description: "Render raw HTML you POST into a PNG, JPEG, or PDF", mimeType: "image/png" },
   },
 };
 
@@ -216,6 +229,22 @@ app.get("/", (_req, res) => {
         },
         returns: "JSON: {title, byline, siteName, markdown, textLength}",
       },
+      "POST /v1/pdf-text": {
+        price: PRICE_PDF_TEXT,
+        body: { url: "required — public http(s) URL of a PDF (max 15MB)" },
+        returns: "JSON: {text, pages, info}",
+      },
+      "POST /v1/html": {
+        price: PRICE_HTML,
+        body: {
+          html: "required — raw HTML to render (max 2MB)",
+          format: "'png' | 'jpeg' | 'pdf', default png",
+          width: "viewport width px, 320-3840, default 1280",
+          height: "viewport height px, 320-2160, default 800",
+          fullPage: "boolean, default false (png/jpeg only)",
+        },
+        returns: "image or PDF bytes",
+      },
     },
   });
 });
@@ -256,6 +285,87 @@ app.post("/v1/pdf", async (req, res) => {
       return page.pdf({ scale: Math.min(2, Math.max(0.5, parseFloat(scale) || 1)), timeout: 15000 });
     });
     res.type("application/pdf").send(buf);
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message || "render failed" });
+  }
+});
+
+// Proxy-aware, SSRF-validated fetch via the browser's request stack.
+// Follows up to 3 redirects, re-validating every hop against private ranges.
+async function fetchPublicResource(startUrl) {
+  return withSlot(async () => {
+    const browser = await getBrowser();
+    const context = await browser.newContext();
+    try {
+      let url = startUrl;
+      for (let hop = 0; hop <= 3; hop++) {
+        await assertPublicHttpUrl(url);
+        const resp = await context.request.get(url, { maxRedirects: 0, timeout: NAV_TIMEOUT_MS });
+        const status = resp.status();
+        if (status >= 300 && status < 400) {
+          const loc = resp.headers()["location"];
+          if (!loc) throw Object.assign(new Error("redirect without location"), { status: 502 });
+          url = new URL(loc, url).href;
+          continue;
+        }
+        if (status !== 200) throw Object.assign(new Error(`upstream returned ${status}`), { status: 502 });
+        const len = parseInt(resp.headers()["content-length"] || "0", 10);
+        if (len > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
+        const buf = await resp.body();
+        if (buf.length > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
+        return buf;
+      }
+      throw Object.assign(new Error("too many redirects"), { status: 502 });
+    } finally {
+      await context.close().catch(() => {});
+    }
+  });
+}
+
+const { PDFParse } = require("pdf-parse");
+
+app.post("/v1/pdf-text", async (req, res) => {
+  const { url } = req.body || {};
+  try {
+    const target = await assertPublicHttpUrl(String(url || ""));
+    const buf = await fetchPublicResource(target.href);
+    if (buf.slice(0, 5).toString() !== "%PDF-") {
+      throw Object.assign(new Error("resource is not a PDF"), { status: 422 });
+    }
+    const parser = new PDFParse({ data: buf });
+    try {
+      const result = await parser.getText();
+      const info = await parser.getInfo().catch(() => null);
+      res.json({
+        text: result.text,
+        pages: result.total,
+        info: { title: info?.info?.Title || null, author: info?.info?.Author || null },
+      });
+    } finally {
+      await parser.destroy().catch(() => {});
+    }
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message || "pdf extraction failed" });
+  }
+});
+
+app.post("/v1/html", async (req, res) => {
+  const { html, format, width, height, fullPage } = req.body || {};
+  try {
+    if (typeof html !== "string" || !html.trim()) {
+      throw Object.assign(new Error("html (string) is required"), { status: 400 });
+    }
+    const fmt = ["png", "jpeg", "pdf"].includes(format) ? format : "png";
+    const buf = await withPage(async (page) => {
+      await page.setViewportSize({
+        width: clamp(width, 320, 3840, 1280),
+        height: clamp(height, 320, 2160, 800),
+      });
+      await page.setContent(html, { timeout: NAV_TIMEOUT_MS, waitUntil: "load" });
+      if (fmt === "pdf") return page.pdf({ timeout: 15000 });
+      return page.screenshot({ type: fmt, fullPage: Boolean(fullPage), timeout: 15000 });
+    });
+    res.type(fmt === "pdf" ? "application/pdf" : `image/${fmt}`).send(buf);
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message || "render failed" });
   }

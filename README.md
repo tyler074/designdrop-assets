@@ -18,6 +18,8 @@ themselves — and at $0.005/call they don't need a subscription to do it.
 | `POST /v1/screenshot` | `$0.005` | Render a public URL to PNG/JPEG |
 | `POST /v1/pdf` | `$0.01` | Render a public URL to PDF |
 | `POST /v1/markdown` | `$0.003` | Extract a URL's main content as clean Markdown (JS-rendered, Readability) |
+| `POST /v1/pdf-text` | `$0.004` | Extract text from a PDF at a public URL (15MB max) |
+| `POST /v1/html` | `$0.005` | Render raw HTML you POST into PNG, JPEG, or PDF |
 
 ### `POST /v1/screenshot`
 
