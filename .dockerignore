@@ -2,3 +2,6 @@ node_modules
 nohup.out
 .env
 *.log
+designs
+.git
+snap402
