@@ -161,7 +161,16 @@ const PRICING = {
 };
 
 if (PAYMENTS_ENABLED) {
-  app.use(paymentMiddleware(PAY_TO, PRICING, { url: FACILITATOR_URL }));
+  // Facilitator selection: with CDP credentials use Coinbase's facilitator
+  // (required for mainnet `base`); otherwise the URL-based one (testnet default).
+  let facilitatorConfig = { url: FACILITATOR_URL };
+  if (process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET) {
+    facilitatorConfig = require("@coinbase/x402").facilitator;
+    console.log("[snap402] using Coinbase CDP facilitator");
+  } else if (NETWORK === "base") {
+    console.warn("[snap402] WARNING: network is 'base' (mainnet) but no CDP_API_KEY_ID/SECRET set — the default facilitator cannot settle mainnet payments");
+  }
+  app.use(paymentMiddleware(PAY_TO, PRICING, facilitatorConfig));
 } else {
   console.warn("[snap402] PAY_TO_ADDRESS not set — running in FREE dev mode, no payments enforced");
 }

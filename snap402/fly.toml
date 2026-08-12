@@ -1,0 +1,26 @@
+# Fly.io config for snap402.
+# Deploy from the snap402/ directory:
+#   fly launch --copy-config --no-deploy   (first time; pick a unique app name)
+#   fly secrets set PAY_TO_ADDRESS=0x... X402_NETWORK=base CDP_API_KEY_ID=... CDP_API_KEY_SECRET=...
+#   fly deploy
+
+app = "snap402"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8402"
+  MAX_CONCURRENT = "3"
+
+[http_service]
+  internal_port = 8402
+  force_https = true
+  auto_stop_machines = "stop"    # scale to zero when idle — you pay ~nothing
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"                 # Chromium needs headroom; 512MB will OOM

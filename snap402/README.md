@@ -66,17 +66,17 @@ docker run -p 8402:8402 -e PAY_TO_ADDRESS=0xYourAddress -e X402_NETWORK=base sna
 ### Going to mainnet
 
 The default facilitator only settles **Base Sepolia (testnet)** payments. For
-real USDC on Base you need a mainnet facilitator — the simplest is Coinbase's
-(free tier available): create a CDP API key, `npm install @coinbase/x402`, and
-swap the facilitator config in `server.js`:
+real USDC on Base, create a (free-tier) Coinbase CDP API key and set:
 
-```js
-const { facilitator } = require("@coinbase/x402"); // reads CDP_API_KEY_ID / CDP_API_KEY_SECRET
-app.use(paymentMiddleware(PAY_TO, PRICING, facilitator));
+```
+X402_NETWORK=base
+CDP_API_KEY_ID=...
+CDP_API_KEY_SECRET=...
 ```
 
-Then set `X402_NETWORK=base`. Payments land directly in `PAY_TO_ADDRESS` as
-USDC — there is no custodial balance anywhere.
+The server switches to the Coinbase facilitator automatically when the CDP
+variables are present. Payments land directly in `PAY_TO_ADDRESS` as USDC —
+there is no custodial balance anywhere.
 
 ## Paying the endpoint (client side)
 
