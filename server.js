@@ -12,6 +12,7 @@ const NETWORK = process.env.X402_NETWORK || "base-sepolia";
 const FACILITATOR_URL = process.env.FACILITATOR_URL || "https://x402.org/facilitator";
 const PRICE_SCREENSHOT = process.env.PRICE_SCREENSHOT || "$0.005";
 const PRICE_PDF = process.env.PRICE_PDF || "$0.01";
+const PRICE_MARKDOWN = process.env.PRICE_MARKDOWN || "$0.003";
 // Explicit CHROMIUM_PATH wins; otherwise fall back to playwright-core's own
 // browser resolution (PLAYWRIGHT_BROWSERS_PATH or its default install dir).
 const CHROMIUM_PATH = [process.env.CHROMIUM_PATH, "/opt/pw-browsers/chromium"]
@@ -159,6 +160,11 @@ const PRICING = {
     network: NETWORK,
     config: { description: "Render a public URL to PDF", mimeType: "application/pdf" },
   },
+  "POST /v1/markdown": {
+    price: PRICE_MARKDOWN,
+    network: NETWORK,
+    config: { description: "Extract a public URL's main content as clean Markdown (JS-rendered, Readability-extracted)", mimeType: "application/json" },
+  },
 };
 
 if (PAYMENTS_ENABLED) {
@@ -200,6 +206,15 @@ app.get("/", (_req, res) => {
         price: PRICE_PDF,
         body: { url: "required — public http(s) URL", scale: "0.5-2, default 1" },
         returns: "PDF bytes",
+      },
+      "POST /v1/markdown": {
+        price: PRICE_MARKDOWN,
+        body: {
+          url: "required — public http(s) URL",
+          waitUntil: "'load' | 'domcontentloaded' | 'networkidle', default load",
+          delayMs: "extra settle time after load, 0-5000, default 0",
+        },
+        returns: "JSON: {title, byline, siteName, markdown, textLength}",
       },
     },
   });
@@ -243,6 +258,46 @@ app.post("/v1/pdf", async (req, res) => {
     res.type("application/pdf").send(buf);
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message || "render failed" });
+  }
+});
+
+const READABILITY_SRC = require("fs").readFileSync(
+  require.resolve("@mozilla/readability/Readability.js"),
+  "utf8"
+);
+const TurndownService = require("turndown");
+
+app.post("/v1/markdown", async (req, res) => {
+  const { url, waitUntil, delayMs } = req.body || {};
+  try {
+    const target = await assertPublicHttpUrl(String(url || ""));
+    const article = await withPage(async (page) => {
+      await page.goto(target.href, {
+        timeout: NAV_TIMEOUT_MS,
+        waitUntil: ["load", "domcontentloaded", "networkidle"].includes(waitUntil) ? waitUntil : "load",
+      });
+      const settle = clamp(delayMs, 0, 5000, 0);
+      if (settle) await page.waitForTimeout(settle);
+      await page.addScriptTag({ content: READABILITY_SRC });
+      return page.evaluate(() => {
+        // eslint-disable-next-line no-undef
+        const parsed = new Readability(document.cloneNode(true), { charThreshold: 100 }).parse();
+        if (parsed) return parsed;
+        // Readability found no article — fall back to the raw body.
+        return { title: document.title, byline: null, siteName: null, content: document.body.innerHTML };
+      });
+    });
+    const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+    const markdown = td.turndown(article.content || "");
+    res.json({
+      title: article.title || null,
+      byline: article.byline || null,
+      siteName: article.siteName || null,
+      markdown,
+      textLength: markdown.length,
+    });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message || "extraction failed" });
   }
 });
 
