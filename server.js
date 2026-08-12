@@ -145,6 +145,7 @@ function clamp(n, lo, hi, dflt) {
 // App
 // ---------------------------------------------------------------------------
 const app = express();
+app.set("trust proxy", true); // behind Railway/Fly TLS-terminating proxies
 app.use(express.json({ limit: "64kb" }));
 
 const PRICING = {
