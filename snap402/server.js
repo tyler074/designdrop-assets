@@ -167,8 +167,8 @@ if (PAYMENTS_ENABLED) {
   if (process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET) {
     facilitatorConfig = require("@coinbase/x402").facilitator;
     console.log("[snap402] using Coinbase CDP facilitator");
-  } else if (NETWORK === "base") {
-    console.warn("[snap402] WARNING: network is 'base' (mainnet) but no CDP_API_KEY_ID/SECRET set — the default facilitator cannot settle mainnet payments");
+  } else if (NETWORK === "base" && FACILITATOR_URL === "https://x402.org/facilitator") {
+    console.warn("[snap402] WARNING: network is 'base' (mainnet) but FACILITATOR_URL is the testnet default — set FACILITATOR_URL to a mainnet facilitator (e.g. https://facilitator.payai.network) or provide CDP keys");
   }
   app.use(paymentMiddleware(PAY_TO, PRICING, facilitatorConfig));
 } else {
