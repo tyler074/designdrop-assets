@@ -1,0 +1,18 @@
+{
+  "name": "snap402",
+  "version": "0.1.0",
+  "description": "Pay-per-call headless-browser rendering for AI agents (x402 / USDC)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "playwright-core": "^1.62.1",
+    "x402-express": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
