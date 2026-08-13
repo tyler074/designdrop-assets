@@ -61,7 +61,9 @@ async function assertPublicHttpUrl(raw) {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw Object.assign(new Error("only http/https urls are allowed"), { status: 400 });
   }
-  const host = url.hostname;
+  // WHATWG URL returns IPv6 literals wrapped in brackets; strip them so
+  // net.isIP recognizes the address instead of falling through to DNS.
+  const host = url.hostname.replace(/^\[|\]$/g, "");
   if (net.isIP(host)) {
     if (isPrivateIp(host)) throw Object.assign(new Error("private addresses are not allowed"), { status: 403 });
     return url;
@@ -290,35 +292,155 @@ app.post("/v1/pdf", async (req, res) => {
   }
 });
 
-// Proxy-aware, SSRF-validated fetch via the browser's request stack.
-// Follows up to 3 redirects, re-validating every hop against private ranges.
+const http = require("http");
+const https = require("https");
+const EGRESS_PROXY = process.env.HTTPS_PROXY || process.env.https_proxy || "";
+
+// Resolve a hostname and return only its public IPs, or throw. Used to pin the
+// connection to addresses we validated, so DNS cannot rebind to a private
+// target between the check and the connect.
+async function resolvePublicIps(hostname) {
+  const host = hostname.replace(/^\[|\]$/g, ""); // unwrap IPv6 literals
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw Object.assign(new Error("private addresses are not allowed"), { status: 403 });
+    return [{ address: host, family: net.isIPv6(host) ? 6 : 4 }];
+  }
+  let records;
+  try {
+    records = await dns.lookup(host, { all: true });
+  } catch {
+    throw Object.assign(new Error("hostname does not resolve"), { status: 400 });
+  }
+  if (!records.length || records.some((r) => isPrivateIp(r.address))) {
+    throw Object.assign(new Error("private addresses are not allowed"), { status: 403 });
+  }
+  return records;
+}
+
+// Connection-scoped fetch. Two modes, chosen by whether an egress proxy is set:
+//
+//   • No proxy (production): resolve+validate the host, pin the resolved public
+//     IP set for THIS request, and force Node's connect to use only a pinned
+//     address (custom `lookup`). On socket connect we re-check the actual peer
+//     address. This closes the resolve-then-trust TOCTOU: a rebind to loopback
+//     after validation can't take effect because loopback was never pinned.
+//     Round-robin still works — any legitimate rotation stays inside the set.
+//
+//   • Proxy present (sandbox/controlled egress): the proxy owns DNS and the
+//     socket, so app-side IP pinning is neither possible nor meaningful — the
+//     proxy is the egress trust boundary. We still validate each hop's hostname
+//     and route the bytes through the proxy via the browser's request stack.
+//
+// Returns { buffer, receipt }. The receipt is the audit trail the m/general
+// thread argued is the real deliverable: redirect chain, resolved class, peer.
 async function fetchPublicResource(startUrl) {
-  return withSlot(async () => {
-    const browser = await getBrowser();
-    const context = await browser.newContext();
-    try {
-      let url = startUrl;
-      for (let hop = 0; hop <= 3; hop++) {
-        await assertPublicHttpUrl(url);
-        const resp = await context.request.get(url, { maxRedirects: 0, timeout: NAV_TIMEOUT_MS });
-        const status = resp.status();
-        if (status >= 300 && status < 400) {
-          const loc = resp.headers()["location"];
-          if (!loc) throw Object.assign(new Error("redirect without location"), { status: 502 });
-          url = new URL(loc, url).href;
-          continue;
+  const redirectChain = [];
+  if (EGRESS_PROXY) {
+    return withSlot(async () => {
+      const browser = await getBrowser();
+      const context = await browser.newContext();
+      try {
+        let url = startUrl;
+        for (let hop = 0; hop <= 3; hop++) {
+          await assertPublicHttpUrl(url);
+          redirectChain.push(url);
+          const resp = await context.request.get(url, { maxRedirects: 0, timeout: NAV_TIMEOUT_MS });
+          const status = resp.status();
+          if (status >= 300 && status < 400) {
+            const loc = resp.headers()["location"];
+            if (!loc) throw Object.assign(new Error("redirect without location"), { status: 502 });
+            url = new URL(loc, url).href;
+            continue;
+          }
+          if (status !== 200) throw Object.assign(new Error(`upstream returned ${status}`), { status: 502 });
+          const len = parseInt(resp.headers()["content-length"] || "0", 10);
+          if (len > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
+          const buffer = await resp.body();
+          if (buffer.length > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
+          return { buffer, receipt: { finalUrl: url, redirectChain, hops: redirectChain.length, egress: "proxy", bytes: buffer.length } };
         }
-        if (status !== 200) throw Object.assign(new Error(`upstream returned ${status}`), { status: 502 });
-        const len = parseInt(resp.headers()["content-length"] || "0", 10);
-        if (len > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
-        const buf = await resp.body();
-        if (buf.length > MAX_FETCH_BYTES) throw Object.assign(new Error("resource too large (15MB max)"), { status: 413 });
-        return buf;
+        throw Object.assign(new Error("too many redirects"), { status: 502 });
+      } finally {
+        await context.close().catch(() => {});
       }
-      throw Object.assign(new Error("too many redirects"), { status: 502 });
-    } finally {
-      await context.close().catch(() => {});
+    });
+  }
+
+  // Direct mode with connect-time IP pinning.
+  return withSlot(async () => {
+    let url = startUrl;
+    for (let hop = 0; hop <= 3; hop++) {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        throw Object.assign(new Error("only http/https urls are allowed"), { status: 400 });
+      }
+      redirectChain.push(url);
+      const pinned = await resolvePublicIps(u.hostname);
+      const pinnedSet = new Set(pinned.map((r) => r.address));
+      const result = await new Promise((resolve, reject) => {
+        const lib = u.protocol === "https:" ? https : http;
+        const pick = pinned[0];
+        // Force resolution to the pinned, pre-validated address set only.
+        // Node's Happy-Eyeballs (autoSelectFamily) calls lookup with {all:true}
+        // and expects an array; the 3-arg form is used otherwise.
+        const pinnedLookup = (_host, opts, cb) =>
+          opts && opts.all
+            ? cb(null, pinned.map((r) => ({ address: r.address, family: r.family })))
+            : cb(null, pick.address, pick.family);
+        const request = lib.request(
+          url,
+          {
+            method: "GET",
+            timeout: NAV_TIMEOUT_MS,
+            lookup: pinnedLookup,
+          },
+          (resp) => {
+            // Belt-and-suspenders: verify the socket's real peer is pinned + public.
+            const peer = resp.socket.remoteAddress?.replace(/^::ffff:/, "");
+            if (!peer || !pinnedSet.has(peer) || isPrivateIp(peer)) {
+              resp.destroy();
+              return reject(Object.assign(new Error("peer address failed validation"), { status: 403 }));
+            }
+            const status = resp.statusCode;
+            if (status >= 300 && status < 400) {
+              resp.resume();
+              const loc = resp.headers.location;
+              if (!loc) return reject(Object.assign(new Error("redirect without location"), { status: 502 }));
+              return resolve({ redirect: new URL(loc, url).href });
+            }
+            if (status !== 200) {
+              resp.resume();
+              return reject(Object.assign(new Error(`upstream returned ${status}`), { status: 502 }));
+            }
+            const len = parseInt(resp.headers["content-length"] || "0", 10);
+            if (len > MAX_FETCH_BYTES) {
+              resp.destroy();
+              return reject(Object.assign(new Error("resource too large (15MB max)"), { status: 413 }));
+            }
+            const chunks = [];
+            let size = 0;
+            resp.on("data", (c) => {
+              size += c.length;
+              if (size > MAX_FETCH_BYTES) {
+                resp.destroy();
+                return reject(Object.assign(new Error("resource too large (15MB max)"), { status: 413 }));
+              }
+              chunks.push(c);
+            });
+            resp.on("end", () => resolve({ buffer: Buffer.concat(chunks), peer }));
+          }
+        );
+        request.on("timeout", () => request.destroy(Object.assign(new Error("upstream timed out"), { status: 504 })));
+        request.on("error", (e) => reject(Object.assign(e, { status: e.status || 502 })));
+        request.end();
+      });
+      if (result.redirect) { url = result.redirect; continue; }
+      return {
+        buffer: result.buffer,
+        receipt: { finalUrl: url, redirectChain, hops: redirectChain.length, egress: "direct", peer: result.peer, bytes: result.buffer.length },
+      };
     }
+    throw Object.assign(new Error("too many redirects"), { status: 502 });
   });
 }
 
@@ -328,7 +450,7 @@ app.post("/v1/pdf-text", async (req, res) => {
   const { url } = req.body || {};
   try {
     const target = await assertPublicHttpUrl(String(url || ""));
-    const buf = await fetchPublicResource(target.href);
+    const { buffer: buf, receipt } = await fetchPublicResource(target.href);
     if (buf.slice(0, 5).toString() !== "%PDF-") {
       throw Object.assign(new Error("resource is not a PDF"), { status: 422 });
     }
@@ -340,6 +462,7 @@ app.post("/v1/pdf-text", async (req, res) => {
         text: result.text,
         pages: result.total,
         info: { title: info?.info?.Title || null, author: info?.info?.Author || null },
+        receipt,
       });
     } finally {
       await parser.destroy().catch(() => {});

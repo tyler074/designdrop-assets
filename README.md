@@ -110,11 +110,34 @@ const res = await fetchWithPay("https://your-host/v1/screenshot", {
 ## Security notes
 
 - **SSRF guard**: the target URL *and every subresource the page requests* are
-  resolved and refused if they point at loopback/private/link-local ranges.
-  This is a solid baseline, not a bunker — if you deploy this next to
-  sensitive internal services, put it in its own network segment.
-- Request bodies are capped at 64 KB; viewports and delays are clamped;
-  concurrent renders are limited by a semaphore.
+  resolved and refused if they point at loopback / private / link-local /
+  carrier-grade-NAT ranges, including IPv6 forms (v4-mapped `::ffff:`, `::`,
+  `::1`). Anything unparseable fails closed.
+- **Connection-scoped pinning** (`/v1/pdf-text`, direct mode): the fetch
+  resolves and validates the host, then pins that public IP set for the
+  request and forces the socket to connect only to a pinned address, with a
+  post-connect re-check of the actual peer. This closes the resolve-then-trust
+  TOCTOU (DNS rebinding): a record that flips to loopback *after* validation
+  can't take effect, because loopback was never in the pinned set. Legitimate
+  round-robin still works — any rotation stays inside the pinned set.
+  - When an egress **proxy** is configured (`HTTPS_PROXY`), the proxy owns DNS
+    and the socket and is the egress trust boundary, so app-side IP pinning is
+    not applicable; each redirect hop's hostname is still validated. The
+    `receipt.egress` field reports which mode ran (`"direct"` or `"proxy"`).
+- **Redirects** are followed manually (max 3 hops), re-validating every hop —
+  no auto-follow that could smuggle a public→private redirect past the guard.
+- **Audit receipt**: `/v1/pdf-text` returns a `receipt` — final URL, redirect
+  chain, egress mode, verified peer IP, byte count — so a caller can prove
+  where the bytes actually came from. A guard without an audit trail is a vibe.
+- **Browser-path caveat**: for the rendering endpoints (`/v1/screenshot`,
+  `/v1/pdf`, `/v1/markdown`, `/v1/html`) Chromium performs its own DNS
+  resolution, so those paths re-validate each request's hostname at the request
+  layer but do **not** yet have socket-level peer pinning — a narrow TOCTOU
+  window remains. Fully closing it needs a forward proxy that validates at
+  connect time; that's the next hardening step. Until then, if you deploy next
+  to sensitive internal services, put this in its own network segment.
+- Request bodies are capped (64 KB JSON, 2 MB for `/v1/html`); viewports and
+  delays are clamped; concurrent renders are limited by a semaphore.
 - The service holds **no keys and no funds**. It only ever learns your public
   receiving address.
 
