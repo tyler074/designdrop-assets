@@ -301,6 +301,11 @@ app.get("/", (_req, res) => {
 
 app.get("/healthz", (_req, res) => res.json({ ok: true, inFlight }));
 
+// Free, installable skill file: `curl -s <host>/skill.md > SKILL.md`
+app.get("/skill.md", (_req, res) => {
+  res.type("text/markdown").sendFile(require("path").join(__dirname, "skill", "SKILL.md"));
+});
+
 // Paid endpoints -------------------------------------------------------------
 app.post("/v1/screenshot", async (req, res) => {
   const { url, width, height, fullPage, format, waitUntil, delayMs } = req.body || {};

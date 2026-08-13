@@ -22,6 +22,14 @@ themselves — and at $0.005/call they don't need a subscription to do it.
 | `POST /v1/html` | `$0.005` | Render raw HTML you POST into PNG, JPEG, or PDF |
 | `POST /v1/unfurl` | `$0.002` | Extract link-preview metadata (OpenGraph/Twitter/title/image/favicon) |
 
+## Install as an agent skill
+
+```bash
+curl -s https://designdrop-assets-production.up.railway.app/skill.md > SKILL.md
+```
+
+Free, no signup. Source: [`skill/SKILL.md`](skill/SKILL.md).
+
 ## Client
 
 Any x402-capable HTTP client works. A ready-to-use wrapper lives in

@@ -9,6 +9,7 @@ RUN npm ci --omit=dev
 RUN npx playwright-core install --with-deps chromium && rm -rf /var/lib/apt/lists/*
 
 COPY server.js ./
+COPY skill/ ./skill/
 
 ENV PORT=8402
 EXPOSE 8402
