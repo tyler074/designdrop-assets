@@ -15,6 +15,7 @@ const PRICE_PDF = process.env.PRICE_PDF || "$0.01";
 const PRICE_MARKDOWN = process.env.PRICE_MARKDOWN || "$0.003";
 const PRICE_PDF_TEXT = process.env.PRICE_PDF_TEXT || "$0.004";
 const PRICE_HTML = process.env.PRICE_HTML || "$0.005";
+const PRICE_UNFURL = process.env.PRICE_UNFURL || "$0.002";
 const MAX_FETCH_BYTES = 15 * 1024 * 1024;
 // Explicit CHROMIUM_PATH wins; otherwise fall back to playwright-core's own
 // browser resolution (PLAYWRIGHT_BROWSERS_PATH or its default install dir).
@@ -180,6 +181,11 @@ const PRICING = {
     network: NETWORK,
     config: { description: "Render raw HTML you POST into a PNG, JPEG, or PDF", mimeType: "image/png" },
   },
+  "POST /v1/unfurl": {
+    price: PRICE_UNFURL,
+    network: NETWORK,
+    config: { description: "Extract link-preview metadata (OpenGraph/Twitter/title/description/image/favicon) from a public URL", mimeType: "application/json" },
+  },
 };
 
 if (PAYMENTS_ENABLED) {
@@ -246,6 +252,14 @@ app.get("/", (_req, res) => {
           fullPage: "boolean, default false (png/jpeg only)",
         },
         returns: "image or PDF bytes",
+      },
+      "POST /v1/unfurl": {
+        price: PRICE_UNFURL,
+        body: {
+          url: "required — public http(s) URL",
+          waitUntil: "'load' | 'domcontentloaded' | 'networkidle', default domcontentloaded",
+        },
+        returns: "JSON: {url, title, description, image, siteName, favicon, type}",
       },
     },
   });
@@ -491,6 +505,42 @@ app.post("/v1/html", async (req, res) => {
     res.type(fmt === "pdf" ? "application/pdf" : `image/${fmt}`).send(buf);
   } catch (err) {
     res.status(err.status || 502).json({ error: err.message || "render failed" });
+  }
+});
+
+app.post("/v1/unfurl", async (req, res) => {
+  const { url, waitUntil } = req.body || {};
+  try {
+    const target = await assertPublicHttpUrl(String(url || ""));
+    const meta = await withPage(async (page) => {
+      await page.goto(target.href, {
+        timeout: NAV_TIMEOUT_MS,
+        waitUntil: ["load", "domcontentloaded", "networkidle"].includes(waitUntil) ? waitUntil : "domcontentloaded",
+      });
+      return page.evaluate(() => {
+        const pick = (sels) => {
+          for (const s of sels) {
+            const el = document.querySelector(s);
+            const v = el && (el.getAttribute("content") || el.getAttribute("href") || el.textContent);
+            if (v && v.trim()) return v.trim();
+          }
+          return null;
+        };
+        const abs = (u) => { try { return u ? new URL(u, document.baseURI).href : null; } catch { return null; } };
+        return {
+          title: pick(['meta[property="og:title"]', 'meta[name="twitter:title"]', "title"]),
+          description: pick(['meta[property="og:description"]', 'meta[name="twitter:description"]', 'meta[name="description"]']),
+          image: abs(pick(['meta[property="og:image"]', 'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]'])),
+          siteName: pick(['meta[property="og:site_name"]']),
+          type: pick(['meta[property="og:type"]']),
+          favicon: abs(pick(['link[rel="icon"]', 'link[rel="shortcut icon"]', 'link[rel="apple-touch-icon"]']) || "/favicon.ico"),
+          canonical: abs(pick(['link[rel="canonical"]'])),
+        };
+      });
+    });
+    res.json({ url: target.href, ...meta });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message || "unfurl failed" });
   }
 });
 
