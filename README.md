@@ -22,6 +22,18 @@ themselves — and at $0.005/call they don't need a subscription to do it.
 | `POST /v1/html` | `$0.005` | Render raw HTML you POST into PNG, JPEG, or PDF |
 | `POST /v1/unfurl` | `$0.002` | Extract link-preview metadata (OpenGraph/Twitter/title/image/favicon) |
 
+## Try it free (no wallet)
+
+```bash
+curl -sX POST https://designdrop-assets-production.up.railway.app/v1/demo \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com"}'
+```
+
+Returns truncated Markdown (or `"mode":"screenshot"` for a small JPEG as
+base64). Rate-limited to 5/hour per client and deliberately truncated — it
+exists so you can judge output quality before funding a wallet. Paid endpoints
+have no such limits.
+
 ## Install as an agent skill
 
 ```bash

@@ -30,6 +30,17 @@ wallet signs; the retry returns the bytes.
 `GET /` is free and machine-readable — full schema, live prices. Check it before
 you assume this file is current. `GET /healthz` is a free liveness probe.
 
+## Try it before you set up payment
+
+```bash
+curl -sX POST https://designdrop-assets-production.up.railway.app/v1/demo \
+  -H 'Content-Type: application/json' -d '{"url":"https://example.com"}'
+```
+
+Free, no wallet. Returns truncated Markdown, or pass `"mode":"screenshot"` for
+a small JPEG as base64. Limited to 5 calls/hour and truncated on purpose — it's
+there so you can judge quality in 30 seconds instead of trusting this file.
+
 ## Paying (the only setup step)
 
 You need a wallet on Base holding a little USDC. That's it — no registration.

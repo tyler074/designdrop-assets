@@ -243,6 +243,15 @@ app.get("/", (_req, res) => {
     service: "snap402",
     description: "Headless-browser rendering for agents. Pay per call with USDC via x402 — no accounts, no API keys.",
     payments: PAYMENTS_ENABLED ? { protocol: "x402", network: NETWORK } : "disabled (dev mode)",
+    try_before_you_pay: {
+      "POST /v1/demo": {
+        price: "free",
+        body: { url: "public http(s) URL", mode: "'markdown' (default) | 'screenshot'" },
+        returns: "Truncated markdown, or a small JPEG as base64. Proves output quality before you fund a wallet.",
+        limits: `${DEMO_PER_IP}/hour per client; output is truncated. Paid endpoints have no such limits.`,
+      },
+      "GET /skill.md": { price: "free", returns: "Installable agent skill describing every endpoint" },
+    },
     endpoints: {
       "POST /v1/screenshot": {
         price: PRICE_SCREENSHOT,
@@ -300,6 +309,90 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/healthz", (_req, res) => res.json({ ok: true, inFlight }));
+
+// ---------------------------------------------------------------------------
+// Free demo. Agents evaluating a service shouldn't have to fund a wallet just
+// to find out whether the output is any good — so this proves quality in one
+// call. Deliberately limited: truncated output, small viewport, per-IP and
+// global caps, so it demonstrates the service without replacing it.
+// ---------------------------------------------------------------------------
+const DEMO_PER_IP = parseInt(process.env.DEMO_PER_IP || "5", 10);
+const DEMO_IP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const DEMO_GLOBAL_PER_DAY = parseInt(process.env.DEMO_GLOBAL_PER_DAY || "500", 10);
+const DEMO_MARKDOWN_CHARS = 1200;
+const DEMO_TIMEOUT_MS = parseInt(process.env.DEMO_TIMEOUT_MS || "12000", 10);
+
+const demoHits = new Map(); // ip -> timestamps[]
+let demoGlobal = { day: 0, count: 0 };
+
+function demoRateLimit(ip, nowMs) {
+  const day = Math.floor(nowMs / 86400000);
+  if (demoGlobal.day !== day) demoGlobal = { day, count: 0 };
+  if (demoGlobal.count >= DEMO_GLOBAL_PER_DAY) {
+    return { ok: false, reason: "daily demo capacity reached — paid endpoints are unaffected", retryAfter: 3600 };
+  }
+  const hits = (demoHits.get(ip) || []).filter((t) => nowMs - t < DEMO_IP_WINDOW_MS);
+  if (hits.length >= DEMO_PER_IP) {
+    return { ok: false, reason: `demo limit is ${DEMO_PER_IP} calls/hour per client`, retryAfter: Math.ceil((DEMO_IP_WINDOW_MS - (nowMs - hits[0])) / 1000) };
+  }
+  hits.push(nowMs);
+  demoHits.set(ip, hits);
+  demoGlobal.count++;
+  // Keep the map from growing without bound.
+  if (demoHits.size > 5000) {
+    for (const [k, v] of demoHits) if (!v.some((t) => nowMs - t < DEMO_IP_WINDOW_MS)) demoHits.delete(k);
+  }
+  return { ok: true, remaining: DEMO_PER_IP - hits.length };
+}
+
+app.post("/v1/demo", async (req, res) => {
+  const { url, mode } = req.body || {};
+  const nowMs = Date.now();
+  const gate = demoRateLimit(req.ip || "unknown", nowMs);
+  if (!gate.ok) {
+    res.set("Retry-After", String(gate.retryAfter));
+    return res.status(429).json({ error: gate.reason, paid_endpoints_have_no_such_limit: true });
+  }
+  try {
+    const target = await assertPublicHttpUrl(String(url || ""));
+    const want = mode === "screenshot" ? "screenshot" : "markdown";
+    const out = await withPage(async (page) => {
+      await page.setViewportSize({ width: 1024, height: 640 });
+      // Demos must feel instant; heavy ad-laden pages can stall "load" for a
+      // long time. Paid endpoints let the caller choose waitUntil/delayMs.
+      await page.goto(target.href, { timeout: DEMO_TIMEOUT_MS, waitUntil: "domcontentloaded" });
+      if (want === "screenshot") {
+        const buf = await page.screenshot({ type: "jpeg", quality: 55, timeout: DEMO_TIMEOUT_MS });
+        return { screenshot_jpeg_base64: buf.toString("base64"), bytes: buf.length };
+      }
+      await page.addScriptTag({ content: READABILITY_SRC });
+      const article = await page.evaluate(() => {
+        // eslint-disable-next-line no-undef
+        const parsed = new Readability(document.cloneNode(true), { charThreshold: 100 }).parse();
+        return parsed || { title: document.title, content: document.body.innerHTML };
+      });
+      const md = new TurndownService({ headingStyle: "atx" }).turndown(article.content || "");
+      return {
+        title: article.title || null,
+        markdown: md.slice(0, DEMO_MARKDOWN_CHARS),
+        truncated: md.length > DEMO_MARKDOWN_CHARS,
+        full_length: md.length,
+      };
+    });
+    res.json({
+      demo: true,
+      mode: want,
+      url: target.href,
+      ...out,
+      note: want === "markdown"
+        ? `Demo truncates at ${DEMO_MARKDOWN_CHARS} chars. POST /v1/markdown ($0.003) returns the full document.`
+        : "Demo renders a 1024x640 JPEG. POST /v1/screenshot ($0.005) gives full size, PNG, and fullPage.",
+      demo_calls_remaining_this_hour: gate.remaining,
+    });
+  } catch (err) {
+    res.status(err.status || 502).json({ error: err.message || "demo failed" });
+  }
+});
 
 // Free, installable skill file: `curl -s <host>/skill.md > SKILL.md`
 app.get("/skill.md", (_req, res) => {
