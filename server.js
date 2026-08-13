@@ -155,36 +155,70 @@ const app = express();
 app.set("trust proxy", true); // behind Railway/Fly TLS-terminating proxies
 app.use(express.json({ limit: "2mb" })); // /v1/html accepts raw HTML payloads
 
+// `config.inputSchema` / `config.outputSchema` are forwarded verbatim into the
+// x402 discovery entry (the Bazaar catalog), so agents browsing for a service
+// can see the request/response shape and searchable tags without calling us.
+const jsonBody = (fields) => ({ type: "http", bodyType: "application/json", bodyFields: fields });
 const PRICING = {
   "POST /v1/screenshot": {
     price: PRICE_SCREENSHOT,
     network: NETWORK,
-    config: { description: "Render a public URL to PNG or JPEG", mimeType: "image/png" },
+    config: {
+      description: "Render a public URL to a PNG or JPEG screenshot (headless Chromium, JS-rendered)",
+      mimeType: "image/png",
+      inputSchema: jsonBody({ url: "public http(s) URL (required)", width: "320-3840", height: "320-2160", fullPage: "boolean", format: "png|jpeg", waitUntil: "load|domcontentloaded|networkidle", delayMs: "0-5000" }),
+      outputSchema: { type: "binary", contentType: "image/png or image/jpeg", tags: ["screenshot", "render", "browser", "webpage", "image"] },
+    },
   },
   "POST /v1/pdf": {
     price: PRICE_PDF,
     network: NETWORK,
-    config: { description: "Render a public URL to PDF", mimeType: "application/pdf" },
+    config: {
+      description: "Render a public URL to a PDF (headless Chromium)",
+      mimeType: "application/pdf",
+      inputSchema: jsonBody({ url: "public http(s) URL (required)", scale: "0.5-2" }),
+      outputSchema: { type: "binary", contentType: "application/pdf", tags: ["pdf", "render", "browser", "webpage", "print"] },
+    },
   },
   "POST /v1/markdown": {
     price: PRICE_MARKDOWN,
     network: NETWORK,
-    config: { description: "Extract a public URL's main content as clean Markdown (JS-rendered, Readability-extracted)", mimeType: "application/json" },
+    config: {
+      description: "Extract a public URL's main content as clean Markdown (JS-rendered, Readability-extracted)",
+      mimeType: "application/json",
+      inputSchema: jsonBody({ url: "public http(s) URL (required)", waitUntil: "load|domcontentloaded|networkidle", delayMs: "0-5000" }),
+      outputSchema: { type: "json", fields: { title: "string", byline: "string", siteName: "string", markdown: "string", textLength: "number" }, tags: ["markdown", "extract", "readability", "content", "scrape", "article"] },
+    },
   },
   "POST /v1/pdf-text": {
     price: PRICE_PDF_TEXT,
     network: NETWORK,
-    config: { description: "Extract text from a PDF at a public URL", mimeType: "application/json" },
+    config: {
+      description: "Extract text from a PDF at a public URL (connection-pinned fetch, 15MB max)",
+      mimeType: "application/json",
+      inputSchema: jsonBody({ url: "public http(s) URL of a PDF (required)" }),
+      outputSchema: { type: "json", fields: { text: "string", pages: "number", info: "object", receipt: "object" }, tags: ["pdf", "text", "extract", "ocr-alternative", "document"] },
+    },
   },
   "POST /v1/html": {
     price: PRICE_HTML,
     network: NETWORK,
-    config: { description: "Render raw HTML you POST into a PNG, JPEG, or PDF", mimeType: "image/png" },
+    config: {
+      description: "Render raw HTML you POST into a PNG, JPEG, or PDF (for invoices, cards, reports)",
+      mimeType: "image/png",
+      inputSchema: jsonBody({ html: "raw HTML string, max 2MB (required)", format: "png|jpeg|pdf", width: "320-3840", height: "320-2160", fullPage: "boolean" }),
+      outputSchema: { type: "binary", contentType: "image/png, image/jpeg, or application/pdf", tags: ["html", "render", "pdf", "image", "invoice", "report", "template"] },
+    },
   },
   "POST /v1/unfurl": {
     price: PRICE_UNFURL,
     network: NETWORK,
-    config: { description: "Extract link-preview metadata (OpenGraph/Twitter/title/description/image/favicon) from a public URL", mimeType: "application/json" },
+    config: {
+      description: "Extract link-preview metadata (OpenGraph/Twitter/title/description/image/favicon) from a public URL",
+      mimeType: "application/json",
+      inputSchema: jsonBody({ url: "public http(s) URL (required)", waitUntil: "load|domcontentloaded|networkidle" }),
+      outputSchema: { type: "json", fields: { title: "string", description: "string", image: "string", siteName: "string", favicon: "string", type: "string", canonical: "string" }, tags: ["unfurl", "link-preview", "opengraph", "metadata", "embed", "card"] },
+    },
   },
 };
 
